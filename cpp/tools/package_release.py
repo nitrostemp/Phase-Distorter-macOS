@@ -6,6 +6,8 @@ Run only after native binaries and Linux runtime libraries have been finalized.
 --binaries-dir takes the native applications from a build or install folder
 instead of the repository root; --output-dir writes only the versioned ZIPs
 there, leaving releases/ and the root aliases untouched (as CI does).
+--glibc states the Linux runtime's glibc requirement in its README; the
+default matches the runtime committed in lib/.
 The optional --linux-runtime-dir accepts an independently prepared runtime tree;
 its file names and license records are still explicitly whitelisted below.
 Versioned archives live under releases/. Root windows-VERSION.zip,
@@ -103,19 +105,20 @@ def require_native(entry: Entry, platform: str) -> None:
         raise ValueError(f"Expected a native {platform} x86-64 binary: {entry.name}")
 
 
-def template(name: str, version: str, output_name: str) -> Entry:
+def template(name: str, version: str, output_name: str, glibc: str = "2.43") -> Entry:
     text = (ROOT / "cpp/resources" / name).read_text(encoding="utf-8")
-    text = text.replace("@VERSION@", version)
+    text = text.replace("@VERSION@", version).replace("@GLIBC@", glibc)
     if re.search(r"@[A-Z_]+@", text):
         raise ValueError(f"Unexpanded release template marker in {name}")
     return Entry(output_name, text.encode("utf-8"))
 
 
-def package_entries(platform: str, version: str, runtime: Path, binaries: Path = ROOT) -> list[Entry]:
+def package_entries(platform: str, version: str, runtime: Path, binaries: Path = ROOT,
+                    glibc: str = "2.43") -> list[Entry]:
     # No recursive source-tree copy: adding a file to a worktree cannot silently
     # add it to a release. Every artifact, dependency and notice is named here.
     entries = [file_entry(ROOT / source, name) for source, name in COMMON_NOTICES]
-    entries.extend((template(f"release-readme-{platform}.txt", version, "README.txt"),
+    entries.extend((template(f"release-readme-{platform}.txt", version, "README.txt", glibc),
                     template("release-notice.txt", version, "NOTICE.txt")))
     if platform == "windows":
         for name in ("Phase Distorter.exe", "SDL2.dll"):
@@ -215,6 +218,7 @@ def main() -> int:
                         help="Folder holding the native application(s) and SDL2.dll")
     parser.add_argument("--output-dir", type=Path,
                         help="Write only the versioned ZIPs here, without aliases or releases/SHA256SUMS")
+    parser.add_argument("--glibc", default="2.43", help="Linux runtime glibc requirement stated in its README")
     parser.add_argument("--check", action="store_true", help="Validate whitelisted inputs without writing releases")
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.-]+)?", args.version):
@@ -222,8 +226,10 @@ def main() -> int:
     platforms = ("windows", "linux") if args.platform == "all" else (args.platform,)
     # Validate all selected packages first; a missing runtime or notice should
     # fail before any previous release archive is replaced.
-    packages = {platform: package_entries(platform, args.version, args.linux_runtime_dir, args.binaries_dir)
-                for platform in platforms}
+    if not re.fullmatch(r"\d+\.\d+", args.glibc):
+        parser.error("--glibc must be a version such as 2.39")
+    packages = {platform: package_entries(platform, args.version, args.linux_runtime_dir, args.binaries_dir,
+                                          args.glibc) for platform in platforms}
     releases = args.output_dir or ROOT / "releases"
     for platform, entries in packages.items():
         name = f"Phase-Distorter-{args.version}-{platform}-x86_64.zip"

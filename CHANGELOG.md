@@ -9,6 +9,11 @@
   (hash-checked), tested and packaged by `package_release.py`, whose new
   `--binaries-dir` and `--output-dir` options package a build folder into a
   chosen directory without touching `releases/`.
+- Linux in CI: Ubuntu 24.04 builds SDL 2.32.10 from its official source archive
+  with upstream's options, and `cpp/tools/stage_linux_runtime.py` stages it with
+  the C++ runtime, licenses and a build-specific `PROVENANCE.md` for
+  `package_release.py`, whose new `--glibc` option states the audited glibc
+  requirement in the Linux README. The Linux ZIP joins the releases.
 - Widescreen sprites: objects past the native edge are drawn in the margins (the
   game drops them when writing OAM, or skips the entity in its draw loop); the
   game's own execution is unchanged.

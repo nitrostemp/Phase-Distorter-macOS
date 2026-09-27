@@ -8,7 +8,7 @@ in that extracted application folder:
   chmod +x "Phase Distorter"
   "./Phase Distorter"
 
-Requirements: x86-64 Linux, glibc 2.43 or newer, desktop OpenGL support and the
+Requirements: x86-64 Linux, glibc @GLIBC@ or newer, desktop OpenGL support and the
 system graphics/window/audio libraries used by your desktop. SDL2, libstdc++
 and libgcc_s are supplied in lib/; keep that folder beside the executable.
 Graphics drivers and glibc are system components and are not bundled. On an

@@ -1,14 +1,13 @@
-# Builds and tests Phase Distorter, and packages the macOS app and the Windows
-# application. The translated game program is committed in generated/, so no ROM is
+# Builds, tests and packages Phase Distorter for macOS, Windows and Linux. The translated game program is committed in generated/, so no ROM is
 # needed to build and no secrets are used: pull requests build too. Packages contain no
 # ROM and no imported assets.
 #
 # - Pull requests and manual runs: build and test on macOS, Windows and Linux; the
-#   macOS and Windows ZIPs are kept as workflow artifacts.
+#   three ZIPs are kept as workflow artifacts.
 # - Each push to main (other than one changing only .md files): the same, plus a draft
-#   "Latest build" release holding both ZIPs, replaced by the next push's. Drafts are
+#   "Latest build" release holding the ZIPs, replaced by the next push's. Drafts are
 #   only visible to the repository's collaborators.
-# - A pushed tag like v0.1-mac: the same, then a published release with both ZIPs and
+# - A pushed tag like v0.1-mac: the same, then a published release with the ZIPs and
 #   the notes in .github/release/notes.md.
 name: build
 
@@ -116,22 +115,60 @@ jobs:
           if-no-files-found: error
 
   linux:
-    # Keeps the shared code building and passing on the upstream platform.
+    # Upstream's Linux runtime recipe (lib/PROVENANCE.md): original SDL 2.32.10
+    # from its official archive, bundled with the C++ runtime in lib/. Built on
+    # Ubuntu 24.04, so it needs an older glibc than the runtime committed in lib/.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
+        # SDL loads its video and audio backends at run time, but needs their
+        # headers to include them.
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config python3 libsdl2-dev libgl-dev libgl1-mesa-dri xvfb
+          sudo apt-get install -y cmake ninja-build pkg-config python3 patchelf libgl1-mesa-dri xvfb \
+            libgl-dev libegl-dev libgles-dev libdrm-dev libgbm-dev libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxkbcommon-dev libwayland-dev \
+            wayland-protocols libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libudev-dev libdbus-1-dev libsamplerate0-dev
+
+      - name: Build SDL2
+        run: |
+          curl -fsSL -o sdl2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz
+          python3 cpp/tools/stage_linux_runtime.py build-sdl --archive sdl2.tar.gz --prefix "$PWD/sdl/install"
 
       - name: Build
-        run: ./build-linux.sh -G Ninja
+        run: ./build-linux.sh -G Ninja -DSDL2_DIR="$PWD/sdl/install/lib/cmake/SDL2"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          cmake --install build --prefix install
+          glibc=$(python3 cpp/tools/stage_linux_runtime.py stage --sdl-prefix sdl/install \
+            --sdl-source sdl/sdl-work/SDL2-2.32.10 --application "install/Phase Distorter" --output runtime)
+          echo "Runtime requires glibc $glibc"
+          python3 cpp/tools/package_release.py --platform linux --binaries-dir install \
+            --linux-runtime-dir runtime --glibc "$glibc" --output-dir dist
+
+      - name: Check the package runs from its own lib/
+        # The packaged application must find the bundled SDL2 and C++ runtime.
+        run: |
+          cd dist && unzip -q *.zip && cd Phase-Distorter-*-linux-x86_64
+          ldd "$PWD/Phase Distorter" | tee ldd.txt
+          grep -q "libSDL2-2.0.so.0 => $PWD/lib/" ldd.txt
+          grep -q "libstdc++.so.6 => $PWD/lib/" ldd.txt
+          grep -q "libgcc_s.so.1 => $PWD/lib/" ldd.txt
+          if grep -q "not found" ldd.txt; then exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
 
   release:
     needs: [macos, windows, linux]
