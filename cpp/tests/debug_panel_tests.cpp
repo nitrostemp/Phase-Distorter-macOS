@@ -127,11 +127,17 @@ void verify(SDL_Window* window, SDL_GLContext context, const std::string& prefix
         require(!settings.widescreen, "Clicking widescreen checkbox did not update display choice");
         // The filter remains available at native aspect ratio. Exercise actual
         // mouse input so disabled UI scopes cannot accidentally capture it.
-        click(window, panel, draw, 43, 168 + menu_offset);
+        click(window, panel, draw, 43, 233 + menu_offset);
         require(settings.reduce_flashing, "Photosensitivity filter could not be enabled without widescreen");
         click(window, panel, draw, 43, 100 + menu_offset);
         require(settings.widescreen, "Clicking widescreen checkbox did not restore display choice");
         require(settings.reduce_flashing, "Widescreen toggle cleared the photosensitivity filter");
+        // The gameplay option sits with the widescreen controls and defaults on.
+        require(settings.wide_entities, "Keeping characters alive did not default to on");
+        click(window, panel, draw, 43, 158 + menu_offset);
+        require(!settings.wide_entities, "Keep-characters checkbox could not be cleared");
+        click(window, panel, draw, 43, 158 + menu_offset);
+        require(settings.wide_entities, "Keep-characters checkbox could not be set again");
         require(stats.frames == 1234 && stats.cpu_state == "CPU read-only diagnostic snapshot",
             "Panel altered read-only diagnostics");
         require(panel.process_event(key(window, SDLK_ESCAPE)) && !panel.visible(), "Escape did not close panel");
@@ -146,15 +152,17 @@ void verify(SDL_Window* window, SDL_GLContext context, const std::string& prefix
         require(panel.visible() && panel.captures_game_input(), "Explicit visibility did not capture input");
         draw();
         draw();
-        click(window, panel, draw, 43, 168 + menu_offset);
+        click(window, panel, draw, 43, 233 + menu_offset);
         require(!settings.reduce_flashing, "Photosensitivity filter could not be disabled");
-        click(window, panel, draw, 43, 168 + menu_offset);
+        click(window, panel, draw, 43, 233 + menu_offset);
         require(settings.reduce_flashing, "Photosensitivity filter could not be re-enabled");
         // The scoped-effects explanation wraps to three lines in this fixed
         // 480-pixel panel; click the reset button below that explanatory text.
-        click(window, panel, draw, 100, 256 + menu_offset);
+        settings.wide_entities = false;
+        click(window, panel, draw, 100, 321 + menu_offset);
         require(!settings.reduce_flashing && !settings.widescreen && settings.aspect == eb::AspectRatio::SixteenNine,
             "Restore game display did not reset the photosensitivity filter and aspect preferences");
+        require(settings.wide_entities, "Restore game display did not restore keeping characters alive");
         panel.process_event(key(window, SDLK_F1));
         require(!panel.visible(), "F1 did not close visible panel");
     }

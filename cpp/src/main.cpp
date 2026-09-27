@@ -70,6 +70,7 @@ struct Options {
     bool aspect_override = false;
     bool widescreen_override = false;
     bool flashing_override = false;
+    bool entities_override = false;
     bool game_override = false;
     eb::GameVersion game = eb::GameVersion::US;
     eb::DisplaySettings display;
@@ -172,6 +173,9 @@ Options parse_options(int argc, char** argv) {
                 "  --no-widescreen    Use the original 256x224 view\n"
                 "  --reduce-flashing Enable the optional photosensitivity filter\n"
                 "  --no-reduce-flashing  Disable the photosensitivity filter (default)\n"
+                "  --wide-entities    Keep characters alive across the wide view (default;\n"
+                "                     changes gameplay)\n"
+                "  --no-wide-entities Keep the original game's entity ranges\n"
                 "  --config FILE      Use a display preferences file\n"
                 "  --no-config        Do not load or save display preferences\n"
                 "  --assets FILE      Use an imported .ebpak asset pack\n"
@@ -205,6 +209,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--reduce-flashing" || arg == "--no-reduce-flashing") {
             options.display.reduce_flashing = arg == "--reduce-flashing";
             options.flashing_override = true;
+        } else if (arg == "--wide-entities" || arg == "--no-wide-entities") {
+            options.display.wide_entities = arg == "--wide-entities";
+            options.entities_override = true;
         } else if (arg == "--aspect") {
             aspect_option(options.display, next());
             options.display.widescreen = true;
@@ -255,6 +262,7 @@ eb::DisplaySettings load_display_settings(const std::string& path, eb::GameVersi
             std::size_t used = 0;
             if (key == "widescreen" && (value == "0" || value == "1")) settings.widescreen = value == "1";
             else if (key == "reduce_flashing" && (value == "0" || value == "1")) settings.reduce_flashing = value == "1";
+            else if (key == "wide_entities" && (value == "0" || value == "1")) settings.wide_entities = value == "1";
             else if (key == "game" && (value == "earthbound" || value == "mother2"))
                 game = value == "mother2" ? eb::GameVersion::JP : eb::GameVersion::US;
             else if (key == "aspect") {
@@ -283,6 +291,7 @@ void store_display_settings(const std::string& path, const eb::DisplaySettings& 
         std::ofstream output(temporary);
         output << "widescreen " << int(settings.widescreen) << "\naspect " << int(settings.aspect)
                << "\nreduce_flashing " << int(settings.reduce_flashing)
+               << "\nwide_entities " << int(settings.wide_entities)
                << "\ncustom_aspect " << std::setprecision(9) << settings.custom_aspect
                << "\ngame " << game_basename(game) << '\n';
         output.close();
@@ -796,6 +805,7 @@ int run_session(Options options, std::optional<NextSession>& next) {
         }
         if (options.widescreen_override) settings.widescreen = options.display.widescreen;
         if (options.flashing_override) settings.reduce_flashing = options.display.reduce_flashing;
+        if (options.entities_override) settings.wide_entities = options.display.wide_entities;
         if (options.aspect_override) {
             settings.aspect = options.display.aspect;
             settings.custom_aspect = options.display.custom_aspect;
@@ -856,6 +866,9 @@ int run_session(Options options, std::optional<NextSession>& next) {
         cpu.reset();
         bus->set_presentation_width(settings.render_width(width * options.scale, height * options.scale));
         bus->set_presentation_effects_enabled(settings.reduce_flashing);
+        // A gameplay option: it takes effect only while the picture is wider
+        // than native, sized to the requested width.
+        bus->set_wide_entities(settings.wide_entities);
         eb::PhotosensitivityFilter photosensitivity_filter;
         std::span<const std::uint32_t> picture = bus->presentation_pixels();
         unsigned picture_width = bus->presentation_width();
@@ -914,6 +927,7 @@ int run_session(Options options, std::optional<NextSession>& next) {
                 // records them alongside each scanline, before DMA or game code
                 // can advance to another effect phase. No emulated state changes.
                 bus->set_presentation_effects_enabled(settings.reduce_flashing);
+                bus->set_wide_entities(settings.wide_entities);
                 bus->set_buttons(buttons);
                 const auto previous_frame = bus->frames;
                 // CPU bus clocks also drive the attached PPU/APU. Do not create
@@ -1012,7 +1026,7 @@ int eb::run_application(int argc, char** argv) {
             options.game = next->game;
             options.game_override = options.default_assets_only = true;
             options.display = next->display;
-            options.aspect_override = options.widescreen_override = options.flashing_override = true;
+            options.aspect_override = options.widescreen_override = options.flashing_override = options.entities_override = true;
             options.start_fullscreen = next->fullscreen;
             options.assets.clear();
             options.import_rom.clear();

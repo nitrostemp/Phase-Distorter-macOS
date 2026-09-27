@@ -3,6 +3,7 @@
 // and emulated state separate from the expanded display-only picture.
 #include "eb/bus.hpp"
 #include "eb/cpu.hpp"
+#include "generated_assets.hpp"
 #include "generated_profile.hpp"
 
 #include <cstdlib>
@@ -500,6 +501,146 @@ void wide_presentation(eb::GameVersion version) {
     check(naming->presentation_pixels()[0]==0xff00ff00 && naming->presentation_pixels()[72]==0xff00ff00,"File-select event permits its animated BG2 background across the wide view");
 }
 
+// Replays one frame of the game's object pipeline: OAM_CLEAR, C08CD5 for three
+// one-piece spritemaps, then the NMI's OAM1 upload. The test performs the
+// routines' own WRAM writes; observe_site is what the CPU reports at each
+// routine's entry. Pieces the game drops beyond the native X range, and pieces
+// it wrote wholly left of it, appear in the margins at their real positions.
+void wide_objects(eb::GameVersion version) {
+    const auto& source=eb::source_profile(version);
+    const auto ram=[](eb::Bus& b,unsigned address,uint16_t value) { word(b,0x7e0000+address,value); };
+    const uint32_t writer=0xc00000|source.rom_spritemap_writer, clear=0xc00000|source.rom_oam_clear;
+    const unsigned oam1=source.wram_oam_buffers[0];
+    const auto make=[&](unsigned width) {
+        auto b=std::make_unique<eb::Bus>(rom,version);
+        b->set_presentation_width(width);b->write(0x212c,16);b->write(0x2100,15);
+        color(*b,129,31<<10);for(unsigned r=0;r<8;++r)b->vram[r*2]=255;
+        for(unsigned n=0;n<128;++n)b->oam[n*4+1]=240;
+        // One 8x8 piece: Y offset 0, tile 0, attributes $30, X offset 0, last entry.
+        const uint8_t map[]={0,0,0x30,0,0x80};
+        for(unsigned i=0;i<5;++i)b->wram[0x2000+i]=map[i];
+        b->wram[source.wram_spritemap_bank]=0x7e;
+        return b;
+    };
+    const auto frame=[&](eb::Bus& b,bool observe) {
+        ram(b,source.wram_next_frame_buffer,1);
+        if(observe)b.observe_site(clear,0,0,0);
+        ram(b,source.wram_oam_cursor[0],oam1);ram(b,source.wram_oam_cursor[1],oam1+512);
+        for(unsigned n=0;n<128;++n)b.wram[oam1+n*4+1]=0xe0;
+        for(unsigned i=0;i<32;++i)b.wram[oam1+512+i]=0;
+        // X 300 lies beyond the 9-bit range: C08CD5 writes no entry for it.
+        if(observe)b.observe_site(writer,0x2000,300,21);
+        // X -40 is written with the ninth X bit, wholly left of the picture.
+        if(observe)b.observe_site(0x800000|writer,0x2000,uint16_t(-40),41);
+        b.wram[oam1]=uint8_t(-40);b.wram[oam1+1]=40;b.wram[oam1+2]=0;b.wram[oam1+3]=0x30;b.wram[oam1+512]=1;
+        ram(b,source.wram_oam_cursor[0],oam1+4);
+        if(observe)b.observe_site(writer,0x2000,100,61);
+        b.wram[oam1+4]=100;b.wram[oam1+5]=60;b.wram[oam1+6]=0;b.wram[oam1+7]=0x30;
+        ram(b,source.wram_oam_cursor[0],oam1+8);
+        // The NMI uploads OAM1 from OAM address 0.
+        word(b,0x2102,0);b.write(0x4300,0);b.write(0x4301,4);word(b,0x4302,oam1);b.write(0x4304,0);word(b,0x4305,0x220);
+        b.write(0x420b,1);
+    };
+    auto plain=make(400), wide=make(400);
+    frame(*plain,false);frame(*wide,true);
+    until(*plain,62);until(*wide,62);
+    const auto pixels=wide->presentation_pixels();
+    const auto blue=[&](unsigned y,int x) { return pixels[y*400+unsigned(x+72)]==0xff0000ff; };
+    check(blue(20,300) && blue(20,307) && !blue(20,308),"Object the game drops beyond the right edge appears in the margin");
+    check(blue(40,-40) && blue(40,-33) && !blue(40,-32),"Object the game writes wholly left of the picture appears in the margin");
+    check(blue(60,100) && wide->framebuffer[60*256+100]==0xff0000ff,"On-screen objects are unchanged");
+    check(plain->presentation_pixels()[20*400+372]==0xff000000 && plain->presentation_pixels()[40*400+32]==0xff000000,"Without the game's object list, wholly offscreen OAM stays hidden");
+    check(plain->framebuffer==wide->framebuffer && plain->wram==wide->wram && plain->oam==wide->oam && plain->vram==wide->vram,"Observing the object pipeline changes no native pixel or memory");
+    check(plain->master_clocks()==wide->master_clocks() && plain->read(0x213e)==wide->read(0x213e),"Observing the object pipeline changes no clock or sprite status");
+
+    // OAM that no longer matches the recorded list falls back to plain OAM.
+    until(*wide,225);wide->oam[0]=uint8_t(-41);
+    until(*wide,0);until(*wide,62);
+    check(wide->presentation_pixels()[20*400+372]==0xff000000,"A list that no longer matches OAM is not used");
+
+    // Returning from native width waits for the game's next OAM_CLEAR.
+    auto toggled=make(400);toggled->set_presentation_width(256);toggled->set_presentation_width(400);
+    ram(*toggled,source.wram_oam_cursor[0],oam1);ram(*toggled,source.wram_oam_cursor[1],oam1+512);
+    toggled->observe_site(writer,0x2000,300,21);
+    word(*toggled,0x2102,0);toggled->write(0x4300,0);toggled->write(0x4301,4);word(*toggled,0x4302,oam1);toggled->write(0x4304,0);word(*toggled,0x4305,0x220);
+    toggled->write(0x420b,1);until(*toggled,62);
+    check(toggled->presentation_pixels()[20*400+372]==0xff000000,"A partial list recorded without OAM_CLEAR is not used");
+
+    // C0DB0F queues only entities within -64..319 of the picture. Three entities
+    // share the one-piece spritemap: two beyond that range, one within it.
+    const auto& table=source.wram_entity_draw;
+    const auto entities=[&](eb::Bus& b,bool observe) {
+        const auto entity=[&](unsigned slot,uint16_t next,int x,int y) {
+            const unsigned o=slot*2;
+            ram(b,table[1]+o,next);ram(b,table[2]+o,uint16_t(x));ram(b,table[3]+o,uint16_t(y));
+            ram(b,table[4]+o,0x2000);ram(b,table[5]+o,0x7e);ram(b,table[6]+o,0);
+            ram(b,table[7]+o,source.rom_entity_draw_default&0xffff);ram(b,table[8]+o,0);ram(b,table[10]+o,0);ram(b,table[11]+o,0);
+        };
+        ram(b,table[0],0);entity(0,2,322,31);entity(1,4,-70,51);entity(2,0xffff,100,71);
+        ram(b,source.wram_next_frame_buffer,1);
+        if(observe)b.observe_site(clear,0,0,0);
+        for(unsigned n=0;n<128;++n)b.wram[oam1+n*4+1]=0xe0;
+        ram(b,source.wram_oam_cursor[0],oam1);ram(b,source.wram_oam_cursor[1],oam1+512);
+        if(observe)b.observe_site(0xc00000|source.rom_entity_draw_loop,0,0,0);
+        word(b,0x2102,0);b.write(0x4300,0);b.write(0x4301,4);word(b,0x4302,oam1);b.write(0x4304,0);word(b,0x4305,0x220);
+        b.write(0x420b,1);
+    };
+    auto culled=make(400), unobserved=make(400);
+    entities(*culled,true);entities(*unobserved,false);
+    until(*culled,80);until(*unobserved,80);
+    const auto shown=culled->presentation_pixels();
+    check(shown[30*400+394]==0xff0000ff && shown[30*400+399]==0xff0000ff,"Entity skipped beyond the right draw range appears in the margin");
+    check(shown[50*400+2]==0xff0000ff && shown[50*400+9]==0xff0000ff && shown[50*400+10]==0xff000000,"Entity skipped beyond the left draw range appears in the margin");
+    check(shown[70*400+172]==0xff000000,"Entities the game draws itself are not added again");
+    check(culled->framebuffer==unobserved->framebuffer && culled->wram==unobserved->wram && culled->oam==unobserved->oam,"Observing the entity loop changes no native pixel or memory");
+}
+
+// The gameplay option adjusts fixed instruction sites. Each must hold the
+// expected instruction in the compiled program, and the adjustments must
+// follow the configured width.
+void wide_entities(eb::GameVersion version) {
+    const auto* program=eb::rom_data(version);
+    bool sites=true;
+    for (const auto& site : eb::Bus::wide_entity_sites(version)) {
+        const auto offset=site.address&0x3fffff;
+        sites&=program[offset]==site.opcode;
+        for (unsigned i=1;i<site.length;++i) sites&=program[offset+i]==uint8_t(site.operand>>(8*(i-1)));
+    }
+    check(sites,"Wide-entity sites hold the expected instructions in the compiled program");
+
+    const auto& source=eb::source_profile(version);
+    const auto sites_of=eb::Bus::wide_entity_sites(version);
+    const auto site=[&](unsigned index) { return sites_of[index].address; };
+    auto b=std::make_unique<eb::Bus>(rom,version);
+    eb::Cpu cpu(*b);
+    b->set_presentation_width(398);
+    check(!b->wide_entities_active(),"Wide entities stay off unless enabled");
+    b->set_wide_entities(true);
+    check(b->wide_entities_active(),"Wide entities apply to a wide picture");
+    // At 16:9 the reach is 192: the despawn bound 320 becomes 512.
+    cpu.p=0;cpu.pc=site(1);cpu.a=400;
+    check(b->run_wide_entity_site(cpu) && !(cpu.p&1) && cpu.pc==site(1)+3,"Despawn range widens with the picture");
+    // An entity the original would delete is kept, and its movement pauses.
+    const unsigned current_slot=sites_of[13].operand, slot=5;
+    word(*b,0x7e0000+current_slot,slot);word(*b,0x7e0000+source.wram_entity_script+slot*2,0x28);
+    cpu.pc=site(0);cpu.a=400;cpu.x=100;
+    b->run_wide_entity_site(cpu);
+    cpu.pc=site(12);cpu.x=slot*2;
+    check(b->run_wide_entity_site(cpu) && cpu.pc==site(12)+3,"Kept entities beyond the original range pause");
+    cpu.pc=site(0);cpu.a=100;cpu.x=100;
+    b->run_wide_entity_site(cpu);
+    cpu.pc=site(12);cpu.x=slot*2;
+    check(!b->run_wide_entity_site(cpu) && cpu.pc==site(12),"Entities within the original range move normally");
+    // Animation frames upload for entities within the widened band.
+    cpu.pc=site(10);cpu.a=300;cpu.y=0;
+    check(!b->run_wide_entity_site(cpu) && cpu.a==255,"Animation uploads cover the widened band");
+    cpu.pc=site(10);cpu.a=900;
+    b->run_wide_entity_site(cpu);
+    check(cpu.a==900,"Entities beyond the widened band keep the original upload rule");
+    b->set_presentation_width(256);
+    check(!b->wide_entities_active(),"A native-width picture restores the original game");
+}
+
 void lumine_hall_presentation(eb::GameVersion version) {
     const auto& source=eb::source_profile(version);
     check(source.wram_lumine_maps[0]-source.wram_lumine_header==(version==eb::GameVersion::JP?0x2000u:0x1000u),"Lumine Hall phase maps follow the language-specific preparation source");
@@ -609,6 +750,6 @@ void world_map_presentation(eb::GameVersion version) {
 
 int main() {
     memory(); video_ports(); dma(); presentation_frame_observer(); arithmetic_interrupts_input(); rendering(); background_sprite_window(); offset_per_tile(); hdma(); clock_rates();
-    for(auto version:{eb::GameVersion::US,eb::GameVersion::JP}) {wide_presentation(version);lumine_hall_presentation(version);world_map_presentation(version);selective_effects(version);title_and_gas_effects(version);}
+    for(auto version:{eb::GameVersion::US,eb::GameVersion::JP}) {wide_presentation(version);wide_objects(version);wide_entities(version);lumine_hall_presentation(version);world_map_presentation(version);selective_effects(version);title_and_gas_effects(version);}
     std::cout << "bus: " << checks << " checks passed\n";
 }

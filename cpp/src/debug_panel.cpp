@@ -189,6 +189,10 @@ void DebugPanel::draw(DisplaySettings& settings, const DebugDiagnostics& diagnos
                         }
                         ImGui::TextDisabled("For example, 1.778 is approximately 16:9.");
                     }
+                    // Unlike the other display options, this changes gameplay,
+                    // so the label says so. It applies only to a wide picture.
+                    ImGui::Checkbox("Keep characters alive in widescreen", &settings.wide_entities);
+                    ImGui::TextWrapped("Changes gameplay: characters stay active across the wide view instead of vanishing near the original screen edge.");
                     ImGui::EndDisabled();
                     ImGui::Spacing();
                     // This is independent of widescreen and never changes game

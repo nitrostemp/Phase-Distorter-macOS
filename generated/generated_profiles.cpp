@@ -36,6 +36,15 @@ constexpr SourceProfile profile_us{
     {0x21a9b7,0x21aa5d}, // rom_gas_palettes
     0x313, // file_select_event
     0x161, // lumine_event
+    0x8cd5, // rom_spritemap_writer
+    0x88b1, // rom_oam_clear
+    {0x500,0x800}, // wram_oam_buffers
+    {0x3,0x5}, // wram_oam_cursor
+    0xb, // wram_spritemap_bank
+    0x2e, // wram_next_frame_buffer
+    0xdb0f, // rom_entity_draw_loop
+    0xa3a4, // rom_entity_draw_default
+    {0xa50,0xa9e,0xb16,0xb52,0x112e,0x116a,0x10f2,0x11e2,0x341a,0x2916,0x2baa,0x2be6,0x65}, // wram_entity_draw
 };
 constexpr SourceProfile profile_jp{
     0x993b, // wram_battle_flag
@@ -67,6 +76,15 @@ constexpr SourceProfile profile_jp{
     {0x219cb9,0x219d5f}, // rom_gas_palettes
     0x313, // file_select_event
     0x161, // lumine_event
+    0x8cc6, // rom_spritemap_writer
+    0x88a4, // rom_oam_clear
+    {0x500,0x800}, // wram_oam_buffers
+    {0x3,0x5}, // wram_oam_cursor
+    0xb, // wram_spritemap_bank
+    0x2e, // wram_next_frame_buffer
+    0xdad7, // rom_entity_draw_loop
+    0xa383, // rom_entity_draw_default
+    {0xa46,0xa94,0xb0c,0xb48,0x1124,0x1160,0x10e8,0x11d8,0x1ab8,0x2d14,0x2fa8,0x2fe4,0x65}, // wram_entity_draw
 };
 }
 const SourceProfile& source_profile(GameVersion version) { return version == GameVersion::JP ? profile_jp : profile_us; }

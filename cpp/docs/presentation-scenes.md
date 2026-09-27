@@ -132,6 +132,91 @@ actual PPU configuration should control that case. The gas-station interference
 intro uses BG1 main-screen `$01`, BG2 sub-screen `$02`, and palette animation;
 it is distinct from the static title signature and should remain extended.
 
+## Objects beyond the native picture
+
+Entities do not cull themselves horizontally. Each frame, an entity's screen
+position is `ENTITY_ABS_X - BG1_X_POS` (`C0A023`), its draw callback (`C0A3A4`)
+queues its spritemap through `C08C58`, and `C08B8E` flushes the four priority
+queues through `C08CD5`, which writes OAM. `C08CD5` is the only culling step:
+
+* a piece whose Y is outside -32..223 is dropped;
+* a piece whose 16-bit X has high byte `$00` or `$FF` (-256..255) is written,
+  with the ninth X bit for negative values;
+* any other piece, including every piece at X 256 or more, is dropped.
+
+So a wider view loses objects twice: pieces past the right edge never reach
+OAM, and pieces wholly left of the picture reach OAM but look the same as
+hidden ones. `OAM_CLEAR` hides unused entries with Y `$E0`, not with X.
+
+The presentation records the game's own list instead of widening the routine.
+At `C08CD5` entry the CPU reports A (spritemap pointer), X and Y (screen
+position); the recorder reads the spritemap from `SPRITEMAP_BANK` and the
+cursor from `OAM_ADDR`/`OAM_END_ADDR`, repeats the routine's walk without
+writing anything, and keeps every piece with the OAM slot it received or none.
+`OAM_CLEAR` restarts the list of the buffer selected by `NEXT_FRAME_BUF_ID`
+(1 selects `OAM1`, anything else `OAM2`), and the NMI's OAM upload from
+`OAM1`/`OAM2` latches that buffer's list. At each frame's first row the list is
+used only if every slot it names still holds its piece in OAM; margins then
+draw the game's pieces in the game's order, including the ones it dropped.
+Otherwise they fall back to OAM alone, where wholly offscreen entries stay hidden.
+
+Before any of that, the entity drawing loop `C0DB0F` (run through
+`CURRENT_ENTITY_DRAW_CALLBACK` once every screen position is set) queues only
+entities whose screen X is within -64..319 and Y within -64..255. At its entry
+the presentation walks the entity list and, for each entity skipped only for
+its X whose draw callback is the usual `C0A3A4`, repeats that callback without
+its writes: the spritemap from `ENTITY_SPRITEMAP_POINTER_LOW/HIGH` (advanced by
+`ENTITY_SPRITEMAP_SIZES` when `ENTITY_CURRENT_DISPLAYED_SPRITES` bit 0 is set),
+with the OBJ priority `C0A3A4` writes into the upper and lower body entries
+from `ENTITY_SURFACE_FLAGS` and `ENTITY_UPPER_LOWER_BODY_DIVIDES`, at the
+entity's screen position. Those pieces join the list of the buffer selected by
+`NEXT_FRAME_BUF_ID`, after the game's own pieces, when the NMI uploads it.
+Overlays that `C0AC43` adds (sweat, ripples) and entities with other draw
+callbacks are not repeated. Holding Select on controller 2 switches `C0DB0F` to
+a debugging loop, `C0DA31`; the presentation then adds nothing.
+
+Spawning is unchanged: `REFRESH_MAP_AT_POSITION` spawns entities 64 pixels
+beyond each native edge (columns `SCREEN_LEFT_X - 8` and `+ 40`, rows
+`SCREEN_TOP_Y - 8` and `+ 36`), so objects can still appear in the outermost
+pixels of margins wider than 64 pixels. A 16:9 view has 71.
+
+## Keeping entities alive across the wide view (gameplay option)
+
+Everything above only changes what is drawn. The game itself keeps entities
+only near the native picture, and a wide view — especially a narrow room,
+where the view shifts to show the whole room — exposes places where the
+original game has deleted or never created them:
+
+* Idle NPC scripts call `C40015`, whose `C0C6B6` keeps an entity only while it
+  is within -64..319 of a screen centered on the leader (x from
+  `leader_x - 128`, y from `leader_y - 112`); otherwise the script deletes it.
+* NPCs spawn per 256-pixel sector: `C025CF` for the column 34 tiles right of
+  (or 3 left of) the screen, `C0255C` for rows spanning -2..+36 tiles, and
+  `C0222B` only for NPCs within -64..319 of the camera.
+* `C0DB0F` draws entities within -64..319 (see above), and `C0C711` lets
+  `C0A443` upload an entity's animation frame only when its left edge is within
+  the native picture.
+
+The frontend's "Keep characters alive in widescreen" option (on by default in
+this build, `--no-wide-entities` to disable) widens each of these
+horizontally by a reach covering the configured wide picture: the extra width
+rounded up to a multiple of 64 (192 pixels at 16:9). The CPU hands the fixed
+instruction sites to the Bus before running them (`run_wide_entity_site`),
+which runs them with a widened operand or adjusted register. `bus_tests`
+checks every site's instruction bytes in both compiled programs. Enemy
+spawning is not widened.
+
+Collision data exists only near the picture (a 64-column ring loaded from 16
+tiles left to 41 tiles right), so entities that the original game would have
+deleted keep their place and skip their move callback until they are back
+within its range; they still animate, run scripts and are drawn. Only
+entities whose own script ran the `C0C6B6` check are paused, so scripted
+entities in events move as before. With the option on, gameplay differs from
+the original: kept entities stay where they were instead of respawning at
+their placements, and they hold entity slots. At native width, or with the
+option off, the game runs unchanged; `presentation_differential` does not
+enable it.
+
 ## Verification boundary
 
 Synthetic layer tests can establish wider sampling, clipping, and unchanged

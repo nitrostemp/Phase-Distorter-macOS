@@ -39,6 +39,15 @@ struct SourceProfile {
     std::array<std::uint32_t, 2> rom_gas_palettes;
     std::uint32_t file_select_event;
     std::uint32_t lumine_event;
+    std::uint32_t rom_spritemap_writer;
+    std::uint32_t rom_oam_clear;
+    std::array<std::uint32_t, 2> wram_oam_buffers;
+    std::array<std::uint32_t, 2> wram_oam_cursor;
+    std::uint32_t wram_spritemap_bank;
+    std::uint32_t wram_next_frame_buffer;
+    std::uint32_t rom_entity_draw_loop;
+    std::uint32_t rom_entity_draw_default;
+    std::array<std::uint32_t, 13> wram_entity_draw;
 };
 const SourceProfile& source_profile(GameVersion version);
 }

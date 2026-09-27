@@ -65,7 +65,36 @@
       2206301
     ],
     "file_select_event": 787,
-    "lumine_event": 353
+    "lumine_event": 353,
+    "rom_spritemap_writer": 36053,
+    "rom_oam_clear": 34993,
+    "wram_oam_buffers": [
+      1280,
+      2048
+    ],
+    "wram_oam_cursor": [
+      3,
+      5
+    ],
+    "wram_spritemap_bank": 11,
+    "wram_next_frame_buffer": 46,
+    "rom_entity_draw_loop": 56079,
+    "rom_entity_draw_default": 41892,
+    "wram_entity_draw": [
+      2640,
+      2718,
+      2838,
+      2898,
+      4398,
+      4458,
+      4338,
+      4578,
+      13338,
+      10518,
+      11178,
+      11238,
+      101
+    ]
   },
   "JP": {
     "wram_battle_flag": 39227,
@@ -133,6 +162,35 @@
       2202975
     ],
     "file_select_event": 787,
-    "lumine_event": 353
+    "lumine_event": 353,
+    "rom_spritemap_writer": 36038,
+    "rom_oam_clear": 34980,
+    "wram_oam_buffers": [
+      1280,
+      2048
+    ],
+    "wram_oam_cursor": [
+      3,
+      5
+    ],
+    "wram_spritemap_bank": 11,
+    "wram_next_frame_buffer": 46,
+    "rom_entity_draw_loop": 56023,
+    "rom_entity_draw_default": 41859,
+    "wram_entity_draw": [
+      2630,
+      2708,
+      2828,
+      2888,
+      4388,
+      4448,
+      4328,
+      4568,
+      6840,
+      11540,
+      12200,
+      12260,
+      101
+    ]
   }
 }

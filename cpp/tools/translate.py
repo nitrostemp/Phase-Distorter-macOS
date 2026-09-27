@@ -645,6 +645,27 @@ def source_profile(debug: Path, version: str) -> dict:
         "rom_gas_palettes": [value(name, "rom") for name in ("GAS_STATION_PALETTE", "GAS_STATION_PALETTE_2")],
         "file_select_event": value("EVENT_787", "enum"),
         "lumine_event": value("EVENT_353", "enum"),
+        # C08CD5 turns each queued spritemap into OAM entries and skips pieces
+        # whose X lies outside the 9-bit hardware range; OAM_CLEAR restarts the
+        # buffer the NMI will upload. Wide presentation observes these routines
+        # to place objects in the margins. It never calls them or writes their state.
+        "rom_spritemap_writer": value("UNKNOWN_C08CD5", "rom"),
+        "rom_oam_clear": value("OAM_CLEAR", "rom"),
+        "wram_oam_buffers": [value(name, "ram") for name in ("OAM1", "OAM2")],
+        "wram_oam_cursor": [value(name, "ram") for name in ("OAM_ADDR", "OAM_END_ADDR")],
+        "wram_spritemap_bank": value("SPRITEMAP_BANK", "ram"),
+        "wram_next_frame_buffer": value("NEXT_FRAME_BUF_ID", "ram"),
+        # C0DB0F, the entity drawing loop, skips entities more than 64 pixels
+        # outside the native picture before queuing them; C0A3A4 is the usual
+        # draw callback. The wide view repeats C0A3A4's drawing, read-only, for
+        # entities skipped only horizontally. Table order is fixed by bus.cpp.
+        "rom_entity_draw_loop": value("UNKNOWN_C0DB0F", "rom"),
+        "rom_entity_draw_default": value("UNKNOWN_C0A3A4", "rom"),
+        "wram_entity_draw": [value(name, "ram") for name in (
+            "FIRST_ENTITY", "ENTITY_NEXT_ENTITY_TABLE", "ENTITY_SCREEN_X_TABLE", "ENTITY_SCREEN_Y_TABLE",
+            "ENTITY_SPRITEMAP_POINTER_LOW", "ENTITY_SPRITEMAP_POINTER_HIGH", "ENTITY_ANIMATION_FRAME",
+            "ENTITY_DRAW_CALLBACK", "ENTITY_CURRENT_DISPLAYED_SPRITES", "ENTITY_SPRITEMAP_SIZES",
+            "ENTITY_SURFACE_FLAGS", "ENTITY_UPPER_LOWER_BODY_DIVIDES", "PAD_STATE")],
     }
 
 

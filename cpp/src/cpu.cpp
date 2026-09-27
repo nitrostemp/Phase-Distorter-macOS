@@ -128,6 +128,10 @@ void Cpu::step() {
     if(bus_ && bus_->take_nmi()) { interrupt(true); return; }
     if(bus_ && bus_->irq_pending()) { waiting=false; if(!(p&I)) { interrupt(false); return; } }
     if(waiting) { tick(6); return; }
+    if(bus_) {
+        bus_->observe_site(pc,a,x,y);
+        if(bus_->wide_entities_active() && bus_->run_wide_entity_site(*this)) return;
+    }
     if(!translated_step(*this)) throw std::runtime_error("No translated assembly instruction at "+describe());
 }
 std::string Cpu::describe() const {

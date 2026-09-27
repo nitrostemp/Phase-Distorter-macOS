@@ -5,6 +5,13 @@
 - GitHub Actions workflow: builds and tests macOS and Linux on every push and pull
   request, keeps a draft "Latest build" release for `main`, and publishes tagged releases.
 - README: macOS installation, build, save location and troubleshooting.
+- Widescreen sprites: objects past the native edge are drawn in the margins (the
+  game drops them when writing OAM, or skips the entity in its draw loop); the
+  game's own execution is unchanged.
+- "Keep characters alive in widescreen" (on by default, `--no-wide-entities`):
+  a gameplay option that widens the game's spawn, despawn, draw and animation
+  ranges to the wide view, so characters and objects no longer vanish past the
+  original screen edge.
 
 # Phase Distorter 0.1 — 2026-09-27
 

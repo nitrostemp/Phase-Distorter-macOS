@@ -7,8 +7,9 @@ namespace eb {
 // Numeric values are persisted by the frontend; keep their order stable.
 enum class AspectRatio { Native, FourThree, SixteenTen, SixteenNine, TwentyOneNine, Window, Custom };
 
-// Presentation preferences only. These values must never drive CPU timing,
-// camera coordinates, controller sampling, or the game's entity visibility.
+// Presentation preferences. These values must never drive CPU timing, camera
+// coordinates or controller sampling. wide_entities is the one exception to
+// presentation-only behavior: an explicit gameplay option, described below.
 struct DisplaySettings {
     static constexpr int native_width = 256;
     static constexpr int native_height = 224;
@@ -17,6 +18,11 @@ struct DisplaySettings {
     // Optional host-picture processing, independent of aspect ratio. Keeping it
     // off by default preserves the original output until a user opts in.
     bool reduce_flashing = false;
+    // Gameplay option used only with widescreen: widen the game's own ranges so
+    // characters and objects spawn, stay and are drawn across the wide view.
+    // Without it they vanish about 64 pixels outside the native picture, as the
+    // original game deletes them there. On by default in this build.
+    bool wide_entities = true;
     AspectRatio aspect = AspectRatio::SixteenNine;
     float custom_aspect = 16.f / 9.f;
 

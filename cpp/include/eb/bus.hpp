@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace eb {
+class Cpu;
 struct SourceProfile;
 
 // HiROM cartridge and the CPU-visible SNES hardware. Pixel words are 0xAARRGGBB.
@@ -60,6 +61,40 @@ public:
     // Observers may update their own presentation state, but must not mutate or
     // re-enter the Bus. No callback means no additional picture processing.
     std::function<void(std::span<const uint32_t> pixels, unsigned width, uint64_t frame)> on_presentation_frame;
+    // Presentation only: the CPU reports each source site before executing it.
+    // At the game's spritemap writer and OAM_CLEAR, the wide view records the
+    // object list the game builds, including pieces it skips because they lie
+    // beyond the native 9-bit X range; at the entity drawing loop, it records
+    // entities the loop skips for lying too far left or right. Observing reads
+    // memory without side effects and never changes registers, memory, clocks
+    // or the native picture.
+    void observe_site(uint32_t pc, uint16_t a, uint16_t x, uint16_t y) {
+        const uint32_t site = pc & 0x3fffff;
+        if (site == spritemap_writer_site_) record_spritemap(a, x, y);
+        else if (site == oam_clear_site_) restart_object_record();
+        else if (site == entity_draw_site_) record_culled_entities();
+    }
+    // Gameplay option, off by default. While the presentation is wider than
+    // native, the game's own entity ranges widen to cover it: entities spawn,
+    // stay alive, draw and animate across the wide view instead of only within
+    // 64 pixels of the native picture. Entities that the original game would
+    // have deleted keep their place and pause their movement until they are
+    // back within its range, since collision data only exists near the
+    // picture. This changes game execution relative to the original.
+    void set_wide_entities(bool enabled);
+    bool wide_entities_active() const { return wide_entity_reach_ != 0; }
+    // While active, the CPU offers each instruction site here first. True means
+    // the site ran here (with a widened range) and the translation must not.
+    bool run_wide_entity_site(Cpu& cpu);
+    // The instructions those sites hold in each compiled program (opcode,
+    // operand, length), so tests can confirm the addresses.
+    struct EntitySite {
+        uint32_t address;
+        uint8_t opcode;
+        uint32_t operand;
+        unsigned length;
+    };
+    static std::vector<EntitySite> wide_entity_sites(GameVersion version);
 
     // Public byte arrays hold emulated storage for source execution and state
     // comparisons. Their units match hardware bytes (VRAM register addresses,
@@ -152,6 +187,37 @@ private:
     std::array<int, 2> presentation_world_x_{}, presentation_world_y_{};
     uint64_t presentation_boundary_frame_ = UINT64_MAX;
     int presentation_shift_x_ = 0, presentation_clip_left_ = -384, presentation_clip_right_ = 640;
+    // One spritemap piece as C08CD5 evaluates it: the full signed X, the OAM
+    // entry the game wrote (slot), or -1 when the game skipped it for its X.
+    struct PresentationObject {
+        int16_t x;
+        uint8_t y, tile, attr;
+        bool large;
+        int16_t slot;
+    };
+    // Lists under construction for OAM1/OAM2, the list latched when the NMI
+    // uploads one of them, and whether that list still describes current OAM.
+    std::array<std::vector<PresentationObject>, 2> presentation_object_lists_;
+    std::array<bool, 2> presentation_object_lists_valid_{};
+    std::vector<PresentationObject> presentation_objects_;
+    bool presentation_objects_latched_ = false, presentation_objects_valid_ = false;
+    // Pieces of entities the drawing loop skipped while building one buffer;
+    // they join that buffer's list when the NMI uploads it.
+    std::vector<PresentationObject> presentation_entity_objects_;
+    unsigned presentation_entity_buffer_ = 0;
+    bool presentation_entity_objects_pending_ = false;
+    uint32_t spritemap_writer_site_ = 0, oam_clear_site_ = 0, entity_draw_site_ = 0;
+    // Pixels added to each side of the game's entity ranges (a multiple of 64),
+    // and entities kept alive beyond the original range: slot -> script + 1.
+    bool wide_entities_ = false;
+    int wide_entity_reach_ = 0;
+    std::array<uint16_t, 64> kept_entities_{};
+    // One spritemap entry as C08CD5 evaluates it; entry is its address.
+    struct SpritemapPiece {
+        uint16_t x, y;
+        uint8_t tile, attr, flags;
+        uint16_t entry;
+    };
 
     uint8_t read_io(uint16_t address);
     void write_io(uint16_t address, uint8_t value);
@@ -184,6 +250,17 @@ private:
     void prepare_presentation_boundary();
     uint16_t presentation_tile(unsigned bg, int x, unsigned y, uint16_t original) const;
     uint16_t presentation_map_tile(int tile_x, int tile_y, unsigned bg) const;
+    std::size_t rom_index(uint32_t address) const;
+    bool peek_source(uint32_t address, uint8_t& value) const;
+    int object_buffer(unsigned wram_offset) const;
+    bool walk_spritemap(uint32_t bank, uint16_t pointer, uint16_t base_x, uint16_t base_y,
+                        const std::function<bool(const SpritemapPiece&)>& piece) const;
+    void record_spritemap(uint16_t pointer, uint16_t base_x, uint16_t base_y);
+    void record_culled_entities();
+    void restart_object_record();
+    void update_wide_entity_reach();
+    void latch_presentation_objects(uint32_t source);
+    void validate_presentation_objects();
 };
 
 } // namespace eb

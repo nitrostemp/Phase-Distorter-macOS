@@ -1,4 +1,5 @@
 #include "eb/bus.hpp"
+#include "eb/cpu.hpp"
 #include "generated_profile.hpp"
 
 #include <algorithm>
@@ -87,6 +88,11 @@ Bus::Bus(std::span<const uint8_t> rom, GameVersion version) : version_(version),
     for (auto& channel : dma_) channel.fill(0xff);
     framebuffer.fill(0xff000000);
     sram.fill(0xff);
+    // Both routines are in bank C0 above $8000, so every HiROM mirror of the
+    // program counter reduces to the same site.
+    spritemap_writer_site_ = profile_->rom_spritemap_writer;
+    oam_clear_site_ = profile_->rom_oam_clear;
+    entity_draw_site_ = profile_->rom_entity_draw_loop;
 }
 
 // Changing the host viewport allocates only a presentation buffer. Seed its
@@ -96,6 +102,13 @@ void Bus::set_presentation_width(unsigned width) {
     if (width<256 || width>1024 || (width&1))
         throw std::invalid_argument("presentation width must be even and between 256 and 1024");
     requested_presentation_width_=width;
+    // Object lists are not recorded at native width. Returning to a wide view
+    // waits for the game's next OAM_CLEAR rather than trusting partial lists.
+    if (width==256) {
+        presentation_object_lists_valid_={};
+        presentation_objects_latched_=presentation_objects_valid_=presentation_entity_objects_pending_=false;
+    }
+    update_wide_entity_reach();
     resize_presentation_width(presentation_frame_aspect_?256:width);
 }
 
@@ -151,17 +164,31 @@ uint8_t Bus::read(uint32_t address) {
     else if ((bank & 0x40) == 0 && off < 0x6000) value = read_io(off);
     else if ((bank & 0x7f) >= 0x20 && (bank & 0x7f) < 0x40 && off >= 0x6000 && off < 0x8000)
         value = sram[((bank & 0x1f) * 0x2000 + off - 0x6000) % sram.size()];
-    else if ((bank & 0x40) != 0 || off >= 0x8000) {
-        // SNES mirrors non-power-of-two ROMs by address-line folding.
-        size_t index = address & 0x3fffff, size = rom_.size(), base = 0, mask = 0x200000;
-        while (index >= size && mask) {
-            if (index & mask) { index -= mask; if (size > mask) { size -= mask; base += mask; } }
-            mask >>= 1;
-        }
-        value = rom_[(base + index) % rom_.size()];
-    }
+    else if ((bank & 0x40) != 0 || off >= 0x8000) value = rom_[rom_index(address)];
     open_bus_ = value;
     return value;
+}
+
+// SNES mirrors non-power-of-two ROMs by address-line folding.
+std::size_t Bus::rom_index(uint32_t address) const {
+    size_t index = address & 0x3fffff, size = rom_.size(), base = 0, mask = 0x200000;
+    while (index >= size && mask) {
+        if (index & mask) { index -= mask; if (size > mask) { size -= mask; base += mask; } }
+        mask >>= 1;
+    }
+    return (base + index) % rom_.size();
+}
+
+// Presentation reads of game data: WRAM and cartridge ROM only, without the
+// open-bus or I/O side effects of read(). Other regions report no value.
+bool Bus::peek_source(uint32_t address, uint8_t& value) const {
+    address &= 0xffffff;
+    const unsigned bank = address >> 16, off = address & 0xffff;
+    if (bank == 0x7e || bank == 0x7f) value = wram[address & 0x1ffff];
+    else if ((bank & 0x40) == 0 && off < 0x2000) value = wram[off];
+    else if ((bank & 0x40) != 0 || off >= 0x8000) value = rom_[rom_index(address)];
+    else return false;
+    return true;
 }
 
 // ROM writes have no cartridge-storage effect, but still drive the CPU bus.
@@ -370,6 +397,8 @@ void Bus::dma_transfer(unsigned channels) {
         const unsigned count=word(d,5)?word(d,5):65536;
         uint16_t address=word(d,2);
         const int step=(d[0]&8)?0:((d[0]&16)?-1:1);
+        // Presentation only: note which game buffer an OAM upload comes from.
+        if (!(d[0]&0x87) && d[1]==0x04) latch_presentation_objects((uint32_t(d[4])<<16)|address);
         for (unsigned i=0;i<count;++i) {
             const uint32_t aa=(d[4]<<16)|address;
             const uint16_t bb=0x2100|uint8_t(d[1]+dma_offsets[d[0]&7][i&3]);
@@ -647,6 +676,287 @@ void Bus::sprites(unsigned y, std::array<Pixel,256>& result) {
     sprite_status_|=sprite_pixels(y,result,0);
 }
 
+namespace {
+// Instruction sites (bank C0 offsets) of the game's entity range checks, as
+// the generated sources' file:line comments place them. bus_tests confirms
+// each site's instruction bytes in both compiled programs.
+struct EntityRangeSites {
+    uint16_t despawn_x_min, despawn_x_max;   // C0C6B6:34/36   CMP #-64, CMP #320
+    uint16_t npc_x_min, npc_x_max;           // C0222B:180/186 LDA #-64, LDA #320
+    uint16_t npc_column_right;               // REFRESH_MAP_AT_POSITION:87  ADC #34
+    uint16_t npc_column_left;                // REFRESH_MAP_AT_POSITION:129 JSL C025CF
+    uint16_t npc_row_start, npc_row_span;    // C0255C:28/66   DEC, ADC #36
+    uint16_t draw_x_max, draw_x_min;         // C0DB0F:38/40   CMP #320, CMP #-64
+    uint16_t upload_x;                       // C0C711:16      TYX
+    uint16_t move;                           // RUN_ACTIONSCRIPT_FRAME:42 JSR (ENTITY_MOVE_CALLBACK,X)
+    uint32_t upload_offsets;                 // UNKNOWN_C42A1F, left offset by entity size
+    uint16_t current_entity_slot;            // CURRENT_ENTITY_SLOT
+    uint16_t slot_read;                      // C0C6B6:14 LDA CURRENT_ENTITY_SLOT
+    // Operands that differ between the programs, for verification only.
+    uint32_t column_routine;                 // UNKNOWN_C025CF
+    uint16_t move_callbacks;                 // ENTITY_MOVE_CALLBACK
+};
+constexpr EntityRangeSites entity_sites_us{0xc6f3,0xc6f8,0x2395,0x23ab,0x15f1,0x1647,0x2583,0x25c0,
+    0xdb49,0xdb4e,0xc728,0x94b7,0xc42a1f,0x1a42,0xc6cb,0xc025cf,0x121e};
+constexpr EntityRangeSites entity_sites_jp{0xc6d5,0xc6da,0x23a3,0x23b9,0x1607,0x165d,0x2591,0x25ce,
+    0xdb11,0xdb16,0xc70a,0x9496,0xc4295d,0x1a38,0xc6ad,0xc025dd,0x1214};
+}
+
+std::vector<Bus::EntitySite> Bus::wide_entity_sites(GameVersion version) {
+    const auto& s=version==GameVersion::JP ? entity_sites_jp : entity_sites_us;
+    const auto at=[](uint16_t offset) { return 0xc00000u|offset; };
+    return {
+        {at(s.despawn_x_min),0xc9,0xffc0,3}, {at(s.despawn_x_max),0xc9,320,3},
+        {at(s.npc_x_min),0xa9,0xffc0,3}, {at(s.npc_x_max),0xa9,320,3},
+        {at(s.npc_column_right),0x69,34,3}, {at(s.npc_column_left),0x22,s.column_routine,4},
+        {at(s.npc_row_start),0x3a,0,1}, {at(s.npc_row_span),0x69,36,3},
+        {at(s.draw_x_max),0xc9,320,3}, {at(s.draw_x_min),0xc9,0xffc0,3},
+        {at(s.upload_x),0xbb,0,1}, {at(uint16_t(s.upload_x+2)),0xff,s.upload_offsets,4},
+        {at(s.move),0xfc,s.move_callbacks,3}, {at(s.slot_read),0xad,s.current_entity_slot,3},
+    };
+}
+
+void Bus::set_wide_entities(bool enabled) {
+    wide_entities_=enabled;
+    update_wide_entity_reach();
+}
+
+// Cover the whole wide picture: both margins, and the scenery shift a narrow
+// room can add on one side. Spawning works in whole map tiles and enemy/NPC
+// blocks, so the reach is a multiple of 64 pixels.
+void Bus::update_wide_entity_reach() {
+    const int extra=int(requested_presentation_width_)-256;
+    wide_entity_reach_=wide_entities_ && extra>0 ? (extra+63)/64*64 : 0;
+    if (!wide_entity_reach_) kept_entities_={};
+}
+
+bool Bus::run_wide_entity_site(Cpu& cpu) {
+    // Every site is in bank C0; its HiROM mirrors share the low 22 bits.
+    if (cpu.pc&0x3f0000) return false;
+    const auto& site=version_==GameVersion::JP ? entity_sites_jp : entity_sites_us;
+    const uint16_t pc=uint16_t(cpu.pc);
+    const int reach=wide_entity_reach_, tiles=reach/8;
+    // The game runs all of these with a 16-bit accumulator; anything else is
+    // left to the translation unchanged.
+    const bool wide=!(cpu.p&0x20);
+    const auto immediate=[&](uint8_t opcode,int value) {
+        if (!wide) return false;
+        cpu.execute_opcode(opcode,uint16_t(value),3);
+        return true;
+    };
+    const auto ram_word=[this](unsigned address) { return unsigned(wram[address])|(unsigned(wram[address+1])<<8); };
+    if (pc==site.despawn_x_min) {
+        // C0C6B6 measures A (x) and X (y) from a screen centered on the leader.
+        // Remember entities it keeps only because of the wider range.
+        if (wide && !(cpu.p&0x10)) {
+            const unsigned slot=ram_word(site.current_entity_slot);
+            const auto in=[](uint16_t v,int low,int high) { return v>=uint16_t(low) || v<uint16_t(high); };
+            const bool original=in(cpu.a,-64,320) && in(cpu.x,-64,320);
+            if (slot<kept_entities_.size())
+                kept_entities_[slot]=!original && in(cpu.a,-64-reach,320+reach) && in(cpu.x,-64,320)
+                    ? uint16_t(ram_word(profile_->wram_entity_script+slot*2)+1) : 0;
+        }
+        return immediate(0xc9,-64-reach);
+    }
+    if (pc==site.despawn_x_max || pc==site.draw_x_max) return immediate(0xc9,320+reach);
+    if (pc==site.draw_x_min) return immediate(0xc9,-64-reach);
+    if (pc==site.npc_x_min) return immediate(0xa9,-64-reach);
+    if (pc==site.npc_x_max) return immediate(0xa9,320+reach);
+    if (pc==site.npc_column_right) return immediate(0x69,34+tiles);
+    // C0255C spans its argument -2..+36 tiles; start earlier, end later.
+    if (pc==site.npc_row_span) return immediate(0x69,36+tiles);
+    if (pc==site.npc_column_left || pc==site.npc_row_start) {
+        if (wide) cpu.a=uint16_t(cpu.a-tiles);
+        return false;
+    }
+    if (pc==site.upload_x) {
+        // C0C711 uploads an entity's animation frame only if its left edge,
+        // screen X minus a size-based offset, is within 0..255. Within the
+        // wider band, present a position inside that window instead.
+        uint8_t low=0, high=0;
+        if (wide && !(cpu.p&0x10) && peek_source(site.upload_offsets+cpu.y,low) && peek_source(site.upload_offsets+cpu.y+1,high)) {
+            const int offset=int16_t(low|(high<<8)), left=int16_t(cpu.a)-offset;
+            if ((left<0 || left>=256) && left>=-reach && left<256+reach)
+                cpu.a=uint16_t(offset+std::clamp(left,0,255));
+        }
+        return false;
+    }
+    if (pc==site.move && !(cpu.p&0x10)) {
+        // Entities kept beyond the original range stay put: the game only
+        // loads collision near the picture. Skip the JSR, as a paused tick would.
+        const unsigned slot=cpu.x/2;
+        if (slot<kept_entities_.size() && kept_entities_[slot] &&
+            kept_entities_[slot]==ram_word(profile_->wram_entity_script+slot*2)+1) {
+            cpu.pc=(cpu.pc&0xff0000)|uint16_t(cpu.pc+3);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Which of the game's two OAM buffers holds this WRAM offset (its end
+// included, as a full buffer's cursor), or -1 for neither.
+int Bus::object_buffer(unsigned offset) const {
+    for (unsigned buffer=0;buffer<2;++buffer) {
+        const unsigned base=profile_->wram_oam_buffers[buffer];
+        if (offset>=base && offset<=base+512) return int(buffer);
+    }
+    return -1;
+}
+
+// OAM_CLEAR entry. Like the routine, NEXT_FRAME_BUF_ID == 1 selects OAM1 and
+// any other value OAM2; that buffer's object list starts again, empty.
+void Bus::restart_object_record() {
+    if (requested_presentation_width_==256) return;
+    const unsigned address=profile_->wram_next_frame_buffer;
+    const unsigned buffer=(wram[address]|(wram[address+1]<<8))==1?0:1;
+    presentation_object_lists_[buffer].clear();
+    presentation_object_lists_valid_[buffer]=true;
+}
+
+// Walk a spritemap in the given bank as C08CD5 does: five-byte entries of Y
+// offset, tile, attributes, X offset and flags (bit 7 ends the map, bit 0
+// selects the large size), where a Y offset of $80 continues at the pointer in
+// the tile word. Pieces with Y outside -32..223 are dropped, as the game drops
+// them; each other piece goes to the callback with its 16-bit X and Y, and a
+// false return ends the walk. False means the data could not be read.
+bool Bus::walk_spritemap(uint32_t bank, uint16_t entry, uint16_t base_x, uint16_t base_y,
+                         const std::function<bool(const SpritemapPiece&)>& piece) const {
+    // The game's maps always end; a malformed chain must not stall presentation.
+    for (unsigned guard=0;guard<4096;++guard) {
+        uint8_t bytes[5];
+        for (unsigned i=0;i<5;++i) if (!peek_source(bank+entry+i,bytes[i])) return false;
+        if (bytes[0]==0x80) { entry=uint16_t(bytes[1]|(bytes[2]<<8)); continue; }
+        const uint16_t y=uint16_t(base_y+int8_t(bytes[0])-1);
+        if ((y<0xe0 || y>=0xffe0) &&
+            !piece({uint16_t(base_x+int8_t(bytes[3])),y,bytes[1],bytes[2],bytes[4],entry})) return true;
+        if (bytes[4]&0x80) return true;
+        entry=uint16_t(entry+5);
+    }
+    return false;
+}
+
+// C08CD5 entry: A points to a spritemap in SPRITEMAP_BANK, and X/Y are its
+// screen position. The game drops a piece whose X high byte is neither $00
+// nor $FF, i.e. wholly beyond the native picture; those are recorded for the
+// margins. The walk ends where the game's does, including when OAM is full.
+void Bus::record_spritemap(uint16_t pointer, uint16_t base_x, uint16_t base_y) {
+    if (requested_presentation_width_==256) return;
+    const auto& source=*profile_;
+    const auto ram_word=[this](unsigned address) { return unsigned(wram[address])|(unsigned(wram[address+1])<<8); };
+    unsigned cursor=ram_word(source.wram_oam_cursor[0]);
+    const unsigned end=ram_word(source.wram_oam_cursor[1]);
+    const int buffer=object_buffer(cursor);
+    if (buffer<0 || cursor>=end) return;
+    auto& list=presentation_object_lists_[buffer];
+    auto& valid=presentation_object_lists_valid_[buffer];
+    if (!valid) return;
+    const unsigned base=source.wram_oam_buffers[buffer];
+    bool overflow=false;
+    const bool readable=walk_spritemap(uint32_t(wram[source.wram_spritemap_bank])<<16,pointer,base_x,base_y,
+        [&](const SpritemapPiece& piece) {
+            const bool written=(piece.x>>8)==0 || (piece.x>>8)==0xff;
+            if (list.size()>=1024) { overflow=true; return false; }
+            list.push_back({int16_t(piece.x),uint8_t(piece.y),piece.tile,piece.attr,bool(piece.flags&1),
+                written?int16_t((cursor-base)/4):int16_t(-1)});
+            if (!written) return true;
+            cursor+=4;
+            return (piece.flags&0x80) || cursor<end;
+        });
+    if (!readable || overflow) valid=false;
+}
+
+// C0DB0F entry, once every entity's screen position is set. The loop queues
+// only entities whose screen X is within -64..319 and Y within -64..255. For
+// each entity it skips only because of X, and whose draw callback is the usual
+// C0A3A4, repeat that callback without its writes: the spritemap (advanced by
+// SPRITEMAP_SIZES when CURRENT_DISPLAYED_SPRITES bit 0 is set), with the OBJ
+// priority it gives the upper and lower body entries from SURFACE_FLAGS, at the
+// entity's screen position. Their pieces join the list of the buffer being
+// built, after the game's own; overlays from C0AC43 are not repeated.
+void Bus::record_culled_entities() {
+    presentation_entity_objects_.clear();
+    presentation_entity_objects_pending_=false;
+    if (requested_presentation_width_==256) return;
+    const auto& source=*profile_;
+    const auto& table=source.wram_entity_draw;
+    enum { first, next, screen_x, screen_y, pointer_low, pointer_high, animation, callback,
+           displayed, sizes, surface, divides, pad };
+    const auto ram_word=[this](unsigned address) { return unsigned(wram[address])|(unsigned(wram[address+1])<<8); };
+    // Select on controller 2 makes C0DB0F run its debugging loop instead.
+    if (ram_word(table[pad]+2)&0x2000) return;
+    presentation_entity_buffer_=ram_word(source.wram_next_frame_buffer)==1?0:1;
+    presentation_entity_objects_pending_=true;
+    const int reach=int(requested_presentation_width_-256)/2+64;
+    unsigned entity=ram_word(table[first]);
+    for (unsigned guard=0;entity!=0xffff && guard<64;++guard,entity=ram_word(table[next]+(entity&~1u))) {
+        const unsigned x=entity&~1u;
+        const uint16_t screen_left=uint16_t(ram_word(table[screen_x]+x)), top=uint16_t(ram_word(table[screen_y]+x));
+        if (!(top<256 || top>=0xffc0) || screen_left<uint16_t(320+wide_entity_reach_) ||
+            screen_left>=uint16_t(-64-wide_entity_reach_)) continue;
+        if (int16_t(screen_left)>=256+reach || int16_t(screen_left)<-reach) continue;
+        if ((ram_word(table[pointer_high]+x)&0x8000) || (ram_word(table[animation]+x)&0x8000) ||
+            ram_word(table[callback]+x)!=(source.rom_entity_draw_default&0xffff)) continue;
+        uint16_t pointer=uint16_t(ram_word(table[pointer_low]+x));
+        if (ram_word(table[displayed]+x)&1) pointer=uint16_t(pointer+ram_word(table[sizes]+x));
+        const uint8_t flags=wram[table[surface]+x];
+        // Its eight-bit DEX/BPL loops do nothing for counts above $80.
+        const unsigned upper_count=wram[table[divides]+x+1], lower_count=wram[table[divides]+x];
+        const unsigned upper=upper_count>0x80?0:upper_count, lower=lower_count>0x80?0:lower_count;
+        const auto attribute=[&](const SpritemapPiece& piece) {
+            // C0A3A4 steps an eight-bit index from $FD by five per entry.
+            for (unsigned i=0;i<upper+lower && i<51;++i)
+                if (uint16_t(pointer+((0xfd+5*(i+1))&0xff))==uint16_t(piece.entry+2))
+                    return uint8_t((piece.attr&0xcf)|(i<upper?((flags&2)?0x20:0x30):((flags&1)?0x20:0x30)));
+            return piece.attr;
+        };
+        walk_spritemap(uint32_t(wram[table[pointer_high]+x])<<16,pointer,screen_left,top,
+            [&](const SpritemapPiece& piece) {
+                if (presentation_entity_objects_.size()>=256) return false;
+                presentation_entity_objects_.push_back({int16_t(piece.x),uint8_t(piece.y),piece.tile,
+                    attribute(piece),bool(piece.flags&1),-1});
+                return true;
+            });
+    }
+}
+
+// The NMI uploads a whole OAM buffer from OAM address 0. That buffer's list
+// now describes the displayed objects; any other OAM transfer ends it.
+void Bus::latch_presentation_objects(uint32_t source) {
+    presentation_objects_latched_=false;
+    if (requested_presentation_width_==256) return;
+    const unsigned bank=source>>16, off=source&0xffff;
+    unsigned offset=0;
+    if (bank==0x7e || bank==0x7f) offset=source&0x1ffff;
+    else if ((bank&0x40)==0 && off<0x2000) offset=off;
+    else return;
+    const int buffer=object_buffer(offset);
+    if (buffer<0 || offset!=profile_->wram_oam_buffers[buffer] || oam_address_!=0 ||
+        !presentation_object_lists_valid_[buffer]) return;
+    presentation_objects_=presentation_object_lists_[buffer];
+    if (presentation_entity_objects_pending_ && presentation_entity_buffer_==unsigned(buffer)) {
+        presentation_objects_.insert(presentation_objects_.end(),presentation_entity_objects_.begin(),presentation_entity_objects_.end());
+        presentation_entity_objects_pending_=false;
+    }
+    presentation_objects_latched_=true;
+}
+
+// Use the latched list only while every OAM entry the game wrote still holds
+// its piece and OAM priority rotation is off; otherwise the margins show the
+// plain OAM view.
+void Bus::validate_presentation_objects() {
+    presentation_objects_valid_=presentation_objects_latched_ && !((ppu_[3]&0x80) && ((oam_reload_>>2)&127));
+    if (!presentation_objects_valid_) return;
+    for (const auto& object : presentation_objects_) {
+        if (object.slot<0) continue;
+        const unsigned a=unsigned(object.slot)*4;
+        if (oam[a]!=uint8_t(object.x) || oam[a+1]!=object.y || oam[a+2]!=object.tile || oam[a+3]!=object.attr) {
+            presentation_objects_valid_=false;
+            return;
+        }
+    }
+}
+
 // origin is the native-coordinate x represented by result[0]. OAM ordering,
 // signed nine-bit x, scanline wrap, and hardware object/tile limits are kept
 // separate from output clipping so the host viewport does not create sprites.
@@ -656,32 +966,32 @@ uint8_t Bus::sprite_pixels(unsigned y, std::span<Pixel> result, int origin) cons
     constexpr int mode0p[]={2,5,8,11}, mode1p[]={1,3,7,10}, otherp[]={1,3,5,7};
     const unsigned size_mode=ppu_[1]>>5;
     const unsigned first=(ppu_[3]&0x80)?((oam_reload_>>2)&127):0;
+    const bool presentation=origin || result.size()!=256;
     unsigned count=0, tiles=0;
     uint8_t status=0;
-    for (unsigned n=0;n<128;++n) {
-        const unsigned obj=(n+first)&127, a=obj*4;
-        const unsigned ext=(oam[512+obj/4]>>((obj&3)*2))&3;
-        int x=oam[a]|((ext&1)<<8); if (x>=256) x-=512;
-        const unsigned width=sizes[size_mode][ext>>1][0], height=sizes[size_mode][ext>>1][1];
-        unsigned row=(y-oam[a+1])&255;
-        if (row>=height) continue;
-        if (++count>32) { status|=0x40; break; }
-        // Fully offscreen OAM is also used to hide objects. Presentation does
-        // not reveal these slots; it only completes native edge-crossing OBJs.
-        if ((origin || result.size()!=256) && (x+int(width)<=0 || x>=256)) continue;
-        const unsigned attr=oam[a+3], pal=(attr>>1)&7, level=(attr>>4)&3;
+    // Draw one object's pixels on this line. Hardware objects spend the PPU's
+    // per-line object and tile budgets; false means the object budget is spent
+    // and the PPU ignores the remaining entries. reveal lets an object lying
+    // wholly outside the native picture reach the margins.
+    const auto draw=[&](int x, unsigned top, unsigned tile_number, unsigned attr, bool large, bool hardware, bool reveal) {
+        const unsigned width=sizes[size_mode][large][0], height=sizes[size_mode][large][1];
+        unsigned row=(y-top)&255;
+        if (row>=height) return true;
+        if (hardware && ++count>32) { status|=0x40; return false; }
+        if (presentation && !reveal && (x+int(width)<=0 || x>=256)) return true;
+        const unsigned pal=(attr>>1)&7, level=(attr>>4)&3;
         const unsigned mode=ppu_[5]&7;
         const int priority=(mode==0?mode0p:mode==1?mode1p:otherp)[level];
         if (attr&0x80) row=height-1-row;
         const unsigned base=(ppu_[1]&7)*16384+((attr&1)?(((ppu_[1]>>3)&3)+1)*8192:0);
         for (unsigned col=0;col<width;++col) {
             const int px=x+int(col);
-            if (!(col&7) && px>-8 && px<256 && ++tiles>34) { status|=0x80; break; }
+            if (hardware && !(col&7) && px>-8 && px<256 && ++tiles>34) { status|=0x80; break; }
             const int output_x=px-origin;
             if (output_x<0 || output_x>=int(result.size())) continue;
             const unsigned ix=(attr&0x40)?width-1-col:col;
-            const unsigned tile=((oam[a+2]&0xf0)+((row/8)*16))&0xf0;
-            const unsigned tile_index=tile|((oam[a+2]+ix/8)&15);
+            const unsigned tile=((tile_number&0xf0)+((row/8)*16))&0xf0;
+            const unsigned tile_index=tile|((tile_number+ix/8)&15);
             const unsigned addr=base+tile_index*32+(row&7)*2;
             unsigned color=0;
             for (unsigned plane=0;plane<4;++plane)
@@ -689,7 +999,32 @@ uint8_t Bus::sprite_pixels(unsigned y, std::span<Pixel> result, int origin) cons
             // OAM order resolves overlap before BG priority comparison.
             if (color && result[output_x].priority<0) result[output_x]={palette(128+pal*16+color),priority,4,pal>=4,128+pal*16+color};
         }
+        return true;
+    };
+    const auto draw_oam=[&](unsigned obj, bool reveal) {
+        const unsigned a=obj*4, ext=(oam[512+obj/4]>>((obj&3)*2))&3;
+        int x=oam[a]|((ext&1)<<8); if (x>=256) x-=512;
+        return draw(x,oam[a+1],oam[a+2],oam[a+3],ext>>1,true,reveal);
+    };
+    // With the game's own object list for this OAM, the margins show every
+    // piece at its real position, in the game's order: the entries it wrote
+    // (including ones wholly left of the native picture) and, between them,
+    // the pieces it skipped as beyond the 9-bit X range. Entries outside that
+    // list, and all entries without one, keep the plain OAM rule: an object
+    // wholly outside the native picture may be a hidden one and stays hidden.
+    if (presentation && presentation_objects_valid_ && !first) {
+        unsigned next=0;
+        for (const auto& object : presentation_objects_) {
+            if (object.slot>=0) {
+                next=unsigned(object.slot)+1;
+                if (!draw_oam(unsigned(object.slot),true)) return status;
+            }
+            else draw(object.x,object.y,object.tile,object.attr,object.large,false,true);
+        }
+        for (unsigned obj=next;obj<128;++obj) if (!draw_oam(obj,false)) break;
+        return status;
     }
+    for (unsigned n=0;n<128;++n) if (!draw_oam((n+first)&127,false)) break;
     return status;
 }
 
@@ -1106,6 +1441,7 @@ void Bus::render_line(unsigned y) {
         // or stretch one logo frame. Keep the user's requested width separately.
         presentation_frame_aspect_=(ppu_[5]&7)==3 && ppu_[7]==0x78 && ppu_[8]==0x7c?4.0/3:0.0;
         resize_presentation_width(presentation_frame_aspect_?256:requested_presentation_width_);
+        validate_presentation_objects();
     }
     if (presentation_effects_enabled_) prepare_presentation_effects();
     if (ppu_[0]&0x80) {
