@@ -5,6 +5,10 @@
 - GitHub Actions workflow: builds and tests macOS and Linux on every push and pull
   request, keeps a draft "Latest build" release for `main`, and publishes tagged releases.
 - README: macOS installation, build, save location and troubleshooting.
+- Windows in CI: an MSYS2 UCRT64 build with the official SDL2 2.32.10 MinGW DLL
+  (hash-checked), tested and packaged by `package_release.py`, whose new
+  `--binaries-dir` and `--output-dir` options package a build folder into a
+  chosen directory without touching `releases/`.
 - Widescreen sprites: objects past the native edge are drawn in the margins (the
   game drops them when writing OAM, or skips the entity in its draw loop); the
   game's own execution is unchanged.

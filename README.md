@@ -7,10 +7,10 @@ native desktop application for Linux, Windows and macOS. It includes keyboard an
 controller input, audio, persistent saves, a Settings window, and
 widescreen presentation designed to preserve the original gameplay and spawning.
 
-> **This fork adds macOS.** Download the Mac app from
-> [Releases](https://github.com/nitrostemp/Phase-Distorter-macOS/releases); see
-> [macOS](#macos-apple-silicon) to install it and [macOS build](#macos-build) to
-> build it yourself. Windows and Linux come from the upstream project,
+> **This fork adds macOS.** Download the Mac app, and a Windows build of this
+> fork, from [Releases](https://github.com/nitrostemp/Phase-Distorter-macOS/releases);
+> see [macOS](#macos-apple-silicon) to install it and [macOS build](#macos-build) to
+> build it yourself. The upstream project is
 > [TheRunaway5/Phase-Distorter](https://github.com/TheRunaway5/Phase-Distorter).
 
 Version **0.1** is a development release. Both games run their respective
@@ -420,10 +420,11 @@ installed on. Extra arguments configure CMake, as with `build-linux.sh`. The
 script builds only the application; `cmake --build build` then adds the tests.
 For development, `build/cpp/eb_cpp` also runs directly.
 
-The repository's GitHub Actions workflow runs the same script on macOS 15, and
-builds and tests the Linux version, for every push and pull request. Pushes to
-`main` update a draft "Latest build" release, and a pushed `v*` tag publishes a
-release with the macOS ZIP.
+The repository's GitHub Actions workflow runs the same script on macOS 15,
+builds and tests Windows (MSYS2 UCRT64 with the official SDL2 2.32.10 MinGW
+release, packaged by `cpp/tools/package_release.py`) and Linux, for every push
+and pull request. Pushes to `main` update a draft "Latest build" release, and a
+pushed `v*` tag publishes a release with the macOS and Windows ZIPs.
 
 ### Optional installation of a source build
 

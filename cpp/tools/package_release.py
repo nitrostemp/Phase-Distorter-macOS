@@ -3,6 +3,9 @@
 
 Run only after native binaries and Linux runtime libraries have been finalized.
 --check validates the inputs and reports package contents without writing ZIPs.
+--binaries-dir takes the native applications from a build or install folder
+instead of the repository root; --output-dir writes only the versioned ZIPs
+there, leaving releases/ and the root aliases untouched (as CI does).
 The optional --linux-runtime-dir accepts an independently prepared runtime tree;
 its file names and license records are still explicitly whitelisted below.
 Versioned archives live under releases/. Root windows-VERSION.zip,
@@ -108,7 +111,7 @@ def template(name: str, version: str, output_name: str) -> Entry:
     return Entry(output_name, text.encode("utf-8"))
 
 
-def package_entries(platform: str, version: str, runtime: Path) -> list[Entry]:
+def package_entries(platform: str, version: str, runtime: Path, binaries: Path = ROOT) -> list[Entry]:
     # No recursive source-tree copy: adding a file to a worktree cannot silently
     # add it to a release. Every artifact, dependency and notice is named here.
     entries = [file_entry(ROOT / source, name) for source, name in COMMON_NOTICES]
@@ -116,13 +119,13 @@ def package_entries(platform: str, version: str, runtime: Path) -> list[Entry]:
                     template("release-notice.txt", version, "NOTICE.txt")))
     if platform == "windows":
         for name in ("Phase Distorter.exe", "SDL2.dll"):
-            entry = file_entry(ROOT / name, name, 0o755)
+            entry = file_entry(binaries / name, name, 0o755)
             require_native(entry, platform)
             entries.append(entry)
         entries.append(file_entry(ROOT / "install-shortcuts.vbs", "install-shortcuts.vbs"))
         entries.append(file_entry(ROOT / "cpp/resources/phase-distorter.ico", "cpp/resources/phase-distorter.ico"))
     else:
-        entry = file_entry(ROOT / "Phase Distorter", "Phase Distorter", 0o755)
+        entry = file_entry(binaries / "Phase Distorter", "Phase Distorter", 0o755)
         require_native(entry, platform)
         entries.append(entry)
         entries.append(file_entry(ROOT / "install-linux.sh", "install-linux.sh", 0o755))
@@ -208,6 +211,10 @@ def main() -> int:
     parser.add_argument("--version", default=(ROOT / "VERSION").read_text(encoding="utf-8").strip())
     parser.add_argument("--platform", choices=("all", "windows", "linux"), default="all")
     parser.add_argument("--linux-runtime-dir", type=Path, default=ROOT / "lib")
+    parser.add_argument("--binaries-dir", type=Path, default=ROOT,
+                        help="Folder holding the native application(s) and SDL2.dll")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Write only the versioned ZIPs here, without aliases or releases/SHA256SUMS")
     parser.add_argument("--check", action="store_true", help="Validate whitelisted inputs without writing releases")
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.-]+)?", args.version):
@@ -215,8 +222,9 @@ def main() -> int:
     platforms = ("windows", "linux") if args.platform == "all" else (args.platform,)
     # Validate all selected packages first; a missing runtime or notice should
     # fail before any previous release archive is replaced.
-    packages = {platform: package_entries(platform, args.version, args.linux_runtime_dir) for platform in platforms}
-    releases = ROOT / "releases"
+    packages = {platform: package_entries(platform, args.version, args.linux_runtime_dir, args.binaries_dir)
+                for platform in platforms}
+    releases = args.output_dir or ROOT / "releases"
     for platform, entries in packages.items():
         name = f"Phase-Distorter-{args.version}-{platform}-x86_64.zip"
         if not args.check:
@@ -224,7 +232,7 @@ def main() -> int:
             write_zip(releases / name, entries)
         print(f"{'Validated' if args.check else 'Packaged'} {name}: {len(entries)} files, "
               f"{sum(len(entry.data) for entry in entries):,} uncompressed bytes")
-    if not args.check:
+    if not args.check and not args.output_dir:
         for platform in platforms:
             source = releases / f"Phase-Distorter-{args.version}-{platform}-x86_64.zip"
             names = (f"windows-{args.version}.zip",) if platform == "windows" else (

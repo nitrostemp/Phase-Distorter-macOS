@@ -1,14 +1,15 @@
-# Builds and tests Phase Distorter, and packages the macOS app. The translated game
-# program is committed in generated/, so no ROM is needed to build and no secrets are
-# used: pull requests build too. Packages contain no ROM and no imported assets.
+# Builds and tests Phase Distorter, and packages the macOS app and the Windows
+# application. The translated game program is committed in generated/, so no ROM is
+# needed to build and no secrets are used: pull requests build too. Packages contain no
+# ROM and no imported assets.
 #
-# - Pull requests and manual runs: build and test on macOS and Linux; the macOS ZIP is
-#   kept as a workflow artifact.
+# - Pull requests and manual runs: build and test on macOS, Windows and Linux; the
+#   macOS and Windows ZIPs are kept as workflow artifacts.
 # - Each push to main (other than one changing only .md files): the same, plus a draft
-#   "Latest build" release holding the macOS ZIP, replaced by the next push's. Drafts
-#   are only visible to the repository's collaborators.
-# - A pushed tag like v0.1-mac: the same, then a published release with the macOS ZIP
-#   and the notes in .github/release/notes.md.
+#   "Latest build" release holding both ZIPs, replaced by the next push's. Drafts are
+#   only visible to the repository's collaborators.
+# - A pushed tag like v0.1-mac: the same, then a published release with both ZIPs and
+#   the notes in .github/release/notes.md.
 name: build
 
 on:
@@ -61,6 +62,59 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  windows:
+    # Upstream's Windows toolchain: MSYS2 UCRT64 GCC, with the official SDL2 MinGW
+    # release that upstream ships. The package comes from upstream's packager.
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Get SDL2
+        # The DLL must be the one cpp/external/sdl2/PROVENANCE.md records.
+        run: |
+          curl -fsSL -o sdl2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz
+          tar -xzf sdl2.tar.gz
+          echo "53e8fa7e9ed43c30bd650c39396f0d9d2067d2fff0b926c9433b75202592e4aa  SDL2-2.32.10/x86_64-w64-mingw32/bin/SDL2.dll" | sha256sum -c
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL2_DIR="$(cygpath -m "$PWD/SDL2-2.32.10/cmake")"
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -E '^(video_tests|debug_panel_tests)$'
+
+      - name: Test OpenGL
+        # As on macOS: hosted Windows runners have no GPU, and Windows' fallback
+        # OpenGL may not provide these tests' context. Reported, not required.
+        continue-on-error: true
+        run: ctest --test-dir build --output-on-failure -R '^(video_tests|debug_panel_tests)$'
+
+      - name: Package
+        run: |
+          cmake --install build --prefix install
+          python3 cpp/tools/package_release.py --platform windows --binaries-dir install --output-dir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
   linux:
     # Keeps the shared code building and passing on the upstream platform.
     runs-on: ubuntu-24.04
@@ -80,7 +134,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   release:
-    needs: [macos, linux]
+    needs: [macos, windows, linux]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -92,8 +146,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: macos-arm64
+          pattern: '*-*'
           path: package
+          merge-multiple: true
 
       - name: Release
         run: |
