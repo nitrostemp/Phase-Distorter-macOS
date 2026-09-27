@@ -1,0 +1,109 @@
+# Builds and tests Phase Distorter, and packages the macOS app. The translated game
+# program is committed in generated/, so no ROM is needed to build and no secrets are
+# used: pull requests build too. Packages contain no ROM and no imported assets.
+#
+# - Pull requests and manual runs: build and test on macOS and Linux; the macOS ZIP is
+#   kept as a workflow artifact.
+# - Each push to main (other than one changing only .md files): the same, plus a draft
+#   "Latest build" release holding the macOS ZIP, replaced by the next push's. Drafts
+#   are only visible to the repository's collaborators.
+# - A pushed tag like v0.1-mac: the same, then a published release with the macOS ZIP
+#   and the notes in .github/release/notes.md.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    # Path filters only apply to branch pushes: a tag always builds.
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    # Apple Silicon. macOS 15 rather than the newest: the app (and the Homebrew SDL
+    # bundled in it) can't run on a macOS older than the one it's built on.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ninja sdl2-compat sdl3 dylibbundler
+
+      - name: Build and package
+        run: ./build-macos.sh
+
+      - name: Build the tests
+        run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -E '^(video_tests|debug_panel_tests)$'
+
+      - name: Test OpenGL
+        # These open a window. Hosted macOS runners are VMs without a GPU, where an
+        # OpenGL context may be unavailable, so they report without failing the build.
+        continue-on-error: true
+        run: ctest --test-dir build --output-on-failure -R '^(video_tests|debug_panel_tests)$'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    # Keeps the shared code building and passing on the upstream platform.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config python3 libsdl2-dev libgl-dev libgl1-mesa-dri xvfb
+
+      - name: Build
+        run: ./build-linux.sh -G Ninja
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  release:
+    needs: [macos, linux]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: package
+
+      - name: Release
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            gh release create "$GITHUB_REF_NAME" package/*.zip --verify-tag \
+              --title "Phase Distorter $GITHUB_REF_NAME" --notes-file .github/release/notes.md
+          else
+            # One draft for the branch's newest build: the previous push's is replaced.
+            gh release delete latest-build --yes 2>/dev/null || true
+            gh release create latest-build package/*.zip --draft --target "$GITHUB_SHA" \
+              --title "Latest build ($GITHUB_REF_NAME, ${GITHUB_SHA:0:7})" \
+              --notes "Build of $GITHUB_REF_NAME at $GITHUB_SHA (not published). Replaced by the next push's."
+          fi

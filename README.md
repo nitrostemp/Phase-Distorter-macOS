@@ -3,9 +3,15 @@
 **An EarthBound / Mother 2 PC port, written in C++20.**
 
 Phase Distorter brings EarthBound (US, English) and Mother 2 (Japanese) to a
-native desktop application for Linux and Windows. It includes keyboard and
+native desktop application for Linux, Windows and macOS. It includes keyboard and
 controller input, audio, persistent saves, a Settings window, and
 widescreen presentation designed to preserve the original gameplay and spawning.
+
+> **This fork adds macOS.** Download the Mac app from
+> [Releases](https://github.com/nitrostemp/Phase-Distorter-macOS/releases); see
+> [macOS](#macos-apple-silicon) to install it and [macOS build](#macos-build) to
+> build it yourself. Windows and Linux come from the upstream project,
+> [TheRunaway5/Phase-Distorter](https://github.com/TheRunaway5/Phase-Distorter).
 
 Version **0.1** is a development release. Both games run their respective
 compiled program and use assets imported from the player's own supported ROM.
@@ -128,6 +134,23 @@ executable directly, with English/Japanese actions and the icon. It does not
 require administrator access. Keep the project folder in place or rerun the
 installer after moving it. Both platforms also use the icon on the game window
 and Windows embeds it in the executable.
+
+### macOS (Apple Silicon)
+
+1. From [Releases](https://github.com/nitrostemp/Phase-Distorter-macOS/releases),
+   download **`Phase-Distorter-<version>-macos-arm64.zip`** and extract it.
+2. Open **`Phase Distorter.app`**; you can move it to Applications first. SDL is
+   bundled inside the app, so nothing else needs installing. The minimum macOS
+   version is in the ZIP's `README.txt`.
+3. The app is signed ad hoc rather than by an identified developer, so macOS
+   blocks it the first time. Open it once, then choose **System Settings →
+   Privacy & Security → Open Anyway** and confirm. Alternatively, run
+   `xattr -dr com.apple.quarantine "Phase Distorter.app"` in the extracted folder.
+4. Complete the ROM import described below.
+
+To pass options, run the executable inside the app from a terminal, for example
+`"Phase Distorter.app/Contents/MacOS/Phase Distorter" --game mother2`. On a
+MacBook keyboard, hold **fn** for F1 and F11.
 
 The application remembers the last game selected. The top-level native
 executables always run the supplied snapshot. Source builds are separate; run
@@ -370,6 +393,38 @@ If CMake cannot locate SDL2, add
 `-DSDL2_DIR="/path/to/SDL2/lib/cmake/SDL2"` to the configure command. Use SDL2
 libraries matching your compiler and architecture.
 
+### macOS build
+
+Install Xcode or its command line tools (`xcode-select --install`) and
+[Homebrew](https://brew.sh), then the build tools and SDL:
+
+```sh
+brew install cmake ninja sdl2-compat sdl3 dylibbundler
+```
+
+Then build, package, test and launch:
+
+```sh
+./build-macos.sh
+cmake --build build
+ctest --test-dir build --output-on-failure
+open "dist/Phase Distorter.app"
+```
+
+`build-macos.sh` compiles the application with Apple's clang and packages
+**`dist/Phase Distorter.app`**, which carries its own copies of SDL2
+(sdl2-compat) and SDL3 and so runs without Homebrew, plus the release ZIP
+`dist/Phase-Distorter-<version>-macos-<arch>.zip`. The app is signed ad hoc. Its
+minimum macOS version is that of Homebrew's SDL, which matches the macOS it was
+installed on. Extra arguments configure CMake, as with `build-linux.sh`. The
+script builds only the application; `cmake --build build` then adds the tests.
+For development, `build/cpp/eb_cpp` also runs directly.
+
+The repository's GitHub Actions workflow runs the same script on macOS 15, and
+builds and tests the Linux version, for every push and pull request. Pushes to
+`main` update a draft "Latest build" release, and a pushed `v*` tag publishes a
+release with the macOS ZIP.
+
 ### Optional installation of a source build
 
 Running either the supplied executable or the executable in `build/cpp/`
@@ -428,6 +483,7 @@ Version 0.1 retains the existing `ebsrc/EarthBoundCpp` application-data location
 | --- | --- |
 | Windows | `%APPDATA%\ebsrc\EarthBoundCpp\` |
 | Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/ebsrc/EarthBoundCpp/` |
+| macOS | `~/Library/Application Support/ebsrc/EarthBoundCpp/` |
 
 These are the normal locations chosen by
 [SDL's user-data API](https://wiki.libsdl.org/SDL2/SDL_GetPrefPath); the program
@@ -462,6 +518,7 @@ mean the new directory or release ZIP contains game assets.
 | Linux reports `GLIBC_2.43` missing | Build from source on that machine instead of using the bundled binary. |
 | Linux reports permission denied | Run the `chmod` command in the Linux installation section. |
 | Windows reports `SDL2.dll` missing | Restore the matching DLL beside the executable you are running. |
+| macOS says the app can't be opened | Choose **Open Anyway** in System Settings → Privacy & Security, as in the macOS installation section. |
 | The window closes immediately | Run the native executable from a terminal or Command Prompt to read the error. |
 | Keyboard/gamepad controls stop working | Close Settings with F1 or Escape; it captures physical input while open. |
 | Display preferences cause trouble | Launch with `--no-config --no-widescreen` to use the original view for that session. |

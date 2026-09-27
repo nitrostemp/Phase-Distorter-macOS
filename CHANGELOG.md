@@ -1,3 +1,11 @@
+# macOS port (this fork) — 2026-09-27
+
+- Native macOS (Apple Silicon) build: `build-macos.sh` packages a self-contained
+  `Phase Distorter.app` with bundled SDL2/SDL3 and a release ZIP.
+- GitHub Actions workflow: builds and tests macOS and Linux on every push and pull
+  request, keeps a draft "Latest build" release for `main`, and publishes tagged releases.
+- README: macOS installation, build, save location and troubleshooting.
+
 # Phase Distorter 0.1 — 2026-09-27
 
 - Standalone C++20 source snapshot with compiled US and Japanese program profiles.
